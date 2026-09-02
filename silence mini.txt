@@ -1,0 +1,925 @@
+-- =================================================================
+-- [ BẢNG CẤU HÌNH CONFIG - TÙY CHỈNH DỄ DÀNG ]
+-- =================================================================
+local Config = {
+	-- [ 1. ASSET & MODEL ]
+	Assets = {
+		ModelID = "rbxassetid://111692453970260",
+		ScreamingAudioUrl = "https://github.com/Cyrene611/Modes/raw/refs/heads/main/far%20loop.mp3",
+		EntityDistanceOffset = 3, -- Khoảng cách thực thể
+	},
+
+	-- [ 2. ÂM THANH & NHẠC NỀN ]
+	Audio = {
+		Themes = {
+			{ Url = "rbxassetid://138890398994853", File = "pandemobaba" }
+		},
+		PushSounds = {
+			"https://codeberg.org/qjjdjdjjd/cak/raw/branch/main/ch%E1%BA%A3o%20_1.mp3",
+			"https://codeberg.org/qjjdjdjjd/cak/raw/branch/main/ch%E1%BA%A3o%20_2.mp3",
+			"https://codeberg.org/qjjdjdjjd/cak/raw/branch/main/ch%E1%BA%A3o%20_3.mp3",
+			"https://codeberg.org/qjjdjdjjd/cak/raw/branch/main/ch%E1%BA%A3o%20_4.mp3"
+		},
+		ThemeVolume = 2.5,
+		PushVolume = 5,
+	},
+
+	-- [ 3. CƠ CHẾ 7 PHASE & 3 VÒNG TRÒN ]
+	Gameplay = {
+		TotalPhases = 7,
+		PhaseTimes = {16, 14, 12, 10, 8, 7, 6},
+		
+		CircleFillTime = 1.0,
+		TimeBonusOnComplete = 0.5,
+		FadeOutDuration = 0.4,
+		
+		PlayerFollowSpeed = 45,
+		PushFollowSpeed = 25,
+		PushForce = 9500,
+		PushLockDuration = 0.55,
+		
+		-- Mobile
+		SwipePower = 12,
+		MaxVelocity = 2800,
+		MoveFriction = 0.93,
+	},
+
+	-- [ 4. HIỆU ỨNG HÌNH ẢNH & CAMERA ]
+	Visuals = {
+		PressureShake = true,
+		PressureBlackout = true,
+		ShakeIntensity = 8,
+		ShakeSpeedMultiplier = 0.5,
+		CircleShakeAmount = 5,
+		CircleShakeSpeedX = 17,
+		CircleShakeSpeedY = 20,
+	},
+
+	-- [ 5. BẢNG BÁO TỬ ]
+	Jumpscare = {
+		EntityName = "Pandemonium",
+		EntityImageID = "rbxassetid://78666140831420",
+		OverseerNotes = "Wait... Is that bootleg one?!",
+	}
+}
+
+-- =================================================================
+-- [ LOGIC CHÍNH ]
+-- =================================================================
+local Players = game:GetService("Players") 
+local TweenService = game:GetService("TweenService") 
+local UserInputService = game:GetService("UserInputService") 
+local RunService = game:GetService("RunService") 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer 
+local Main = player.PlayerGui:FindFirstChild("Main") or player.PlayerGui:WaitForChild("Main")
+local Ended = false 
+
+local originalMiniGame = Main:WaitForChild("PandemoniumMiniGame", 5)
+if not originalMiniGame then return end
+
+local miniGame = originalMiniGame:Clone() 
+miniGame.Name = "PandemoniumMiniGameClone" 
+miniGame.Parent = Main 
+
+for _, element in ipairs(miniGame:GetDescendants()) do
+	if element:IsA("TextLabel") then
+		element.Text = "Focus"
+	end
+end
+
+local character = player.Character or player.CharacterAdded:Wait() 
+local hrp = character:WaitForChild("HumanoidRootPart") 
+
+local bgThemeSound = nil -- Biến giữ nhạc nền để điều khiển fade out
+
+-- =======================================================
+-- HỆ THỐNG ANTI-KICK KHÓA TỦ (ĐÃ TỐI ƯU HÓA FPS EXTREME)
+-- =======================================================
+
+local cachedLocker = nil
+local cachedAntiKickScripts = {}
+
+-- 1. Tìm model tủ duy nhất 1 lần (không lặp vô tận trên workspace)
+local function FindCurrentLockerModel()
+	if not hrp then return nil end
+	local charPos = hrp.Position
+	local closestLocker = nil
+	local minDst = 15
+
+	-- Tìm trong workspace
+	for _, v in ipairs(workspace:GetChildren()) do
+		if v:IsA("Model") or v:IsA("Folder") then
+			for _, item in ipairs(v:GetChildren()) do
+				if item:IsA("Model") and (item.Name:find("Locker") or item.Name:find("Hiding") or item.Name:find("Bed") or item.Name:find("Closet")) then
+					local primary = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart")
+					if primary then
+						local dst = (primary.Position - charPos).Magnitude
+						if dst < minDst then
+							minDst = dst
+							closestLocker = item
+						end
+					end
+				end
+			end
+		end
+	end
+	return closestLocker
+end
+
+-- 2. Quét cache các script ngầm chống văng tủ duy nhất 1 lần
+local function CacheAntiKickTargets()
+	cachedAntiKickScripts = {}
+	local searchContainers = {
+		player:FindFirstChild("PlayerGui"),
+		player:FindFirstChild("PlayerScripts"),
+		character
+	}
+
+	for _, container in ipairs(searchContainers) do
+		if container then
+			for _, desc in ipairs(container:GetDescendants()) do
+				local nameLower = desc.Name:lower()
+				if nameLower:find("cleithro") or nameLower:find("claustro") or nameLower:find("locker") or nameLower:find("hiding") then
+					table.insert(cachedAntiKickScripts, desc)
+				end
+			end
+		end
+	end
+end
+
+-- 3. Hàm áp dụng trạng thái Khóa / Mở Khóa tủ cực nhẹ
+local function LockLockerSystem(isLocked)
+	-- A. Báo Server qua RemoteEvent gốc của game
+	pcall(function()
+		local events = ReplicatedStorage:FindFirstChild("Events") or ReplicatedStorage:FindFirstChild("Remotes")
+		if events then
+			local doorLock = events:FindFirstChild("PandemoniumDoorLock") or events:FindFirstChild("LockLocker")
+			if doorLock then
+				doorLock:FireServer(isLocked and "lock" or "unlock")
+			end
+		end
+	end)
+
+	-- B. Khóa trực tiếp thuộc tính trên Model Tủ đã Cache
+	if not cachedLocker or not cachedLocker.Parent then
+		cachedLocker = FindCurrentLockerModel()
+	end
+
+	if cachedLocker then
+		pcall(function()
+			cachedLocker:SetAttribute("CantExit", isLocked or nil)
+			cachedLocker:SetAttribute("Locked", isLocked or nil)
+			cachedLocker:SetAttribute("InMinigame", isLocked or nil)
+			cachedLocker:SetAttribute("InUse", isLocked or nil)
+		end)
+		for _, desc in ipairs(cachedLocker:GetChildren()) do
+			if desc:IsA("BoolValue") and (desc.Name == "CantExit" or desc.Name == "Locked") then
+				desc.Value = isLocked
+			end
+		end
+	end
+
+	-- C. Vô hiệu hóa các Script/Module đã được Cache sẵn (Không tốn CPU)
+	for _, desc in ipairs(cachedAntiKickScripts) do
+		if desc and desc.Parent then
+			if isLocked then
+				if desc:IsA("LocalScript") or desc:IsA("Script") then
+					pcall(function() desc.Disabled = true end)
+				end
+				if getsenv and (desc:IsA("LocalScript") or desc:IsA("Script")) then
+					pcall(function()
+						local env = getsenv(desc)
+						if env.Stop then env.Stop() end
+						if env.Cancel then env.Cancel() end
+						if env.CantExit ~= nil then env.CantExit = true end
+					end)
+				end
+				if desc:IsA("ModuleScript") then
+					pcall(function()
+						local mod = require(desc)
+						if type(mod) == "table" then
+							if mod.Stop then pcall(mod.Stop) end
+							mod.CantExit = true
+						end
+					end)
+				end
+			else
+				if desc:IsA("LocalScript") or desc:IsA("Script") then
+					pcall(function() desc.Disabled = false end)
+				end
+				if getsenv and (desc:IsA("LocalScript") or desc:IsA("Script")) then
+					pcall(function()
+						local env = getsenv(desc)
+						if env.Start then env.Start(desc, 10, 15) end
+						if env.CantExit ~= nil then env.CantExit = nil end
+					end)
+				end
+				if desc:IsA("ModuleScript") then
+					pcall(function()
+						local mod = require(desc)
+						if type(mod) == "table" then
+							if mod.Start then pcall(mod.Start, desc, 10, 15) end
+							mod.CantExit = nil
+						end
+					end)
+				end
+			end
+		end
+	end
+end
+
+-- 4. Hook chặn Remote Event văng tủ (Remote Interceptor)
+pcall(function()
+	if hookmetamethod and getrawmetatable then
+		local oldNC
+		oldNC = hookmetamethod(game, "__namecall", function(self, ...)
+			local method = getnamecallmethod()
+			if not Ended and (method == "FireServer" or method == "InvokeServer") then
+				local name = tostring(self.Name):lower()
+				if name:find("exit") or name:find("eject") or name:find("leave") or name:find("unhide") then
+					if name:find("locker") or name:find("hide") or name:find("closet") then
+						return nil -- Chặn lệnh tự thoát khỏi tủ
+					end
+				end
+			end
+			return oldNC(self, ...)
+		end)
+	end
+end)
+
+-- 5. Quét Cache lần đầu và duy trì khóa nhẹ nhàng (0.25s / lần)
+task.spawn(function()
+	CacheAntiKickTargets()
+	cachedLocker = FindCurrentLockerModel()
+	while not Ended do
+		LockLockerSystem(true)
+		task.wait(0.25)
+	end
+end)
+
+function GitAud(soundgit, filename) 
+	local url = soundgit 
+	local FileName = filename 
+	writefile(FileName .. ".mp3", game:HttpGet(url)) 
+	return (getcustomasset or getsynasset)(FileName .. ".mp3") 
+end 
+
+function CustomGitSound(soundlink, volume, filename, soundName, parent, looped, autoPlay) 
+	local sound = Instance.new("Sound") 
+	if tostring(soundlink):find("rbxassetid://") or tonumber(soundlink) then
+		sound.SoundId = typeof(soundlink) == "number" and ("rbxassetid://" .. soundlink) or soundlink
+	else
+		sound.SoundId = GitAud(soundlink, filename) 
+	end
+	sound.Parent = parent or workspace 
+	sound.Volume = volume or 1 
+	sound.RollOffMaxDistance = 400 
+	sound.RollOffMinDistance = 5 
+	sound.PlaybackSpeed = 1 
+	sound.Name = soundName or "bgtheme" 
+	sound.Looped = looped or false 
+	if autoPlay ~= false then
+		sound:Play() 
+	end
+	return sound 
+end 
+
+-- Hàm Tween CFrame Model mượt mà
+local function TweenModelCFrame(model, targetCFrame, duration)
+	if not model then return end
+	local cfVal = Instance.new("CFrameValue")
+	cfVal.Value = model:GetPivot()
+	local conn = cfVal:GetPropertyChangedSignal("Value"):Connect(function()
+		if model and model.Parent then
+			model:PivotTo(cfVal.Value)
+		end
+	end)
+	local tween = TweenService:Create(cfVal, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Value = targetCFrame})
+	tween:Play()
+	tween.Completed:Connect(function()
+		conn:Disconnect()
+		cfVal:Destroy()
+	end)
+end
+
+-- Load Model 3D Pandemonium & Phát nhạc
+task.spawn(function() 
+	local Themes = Config.Audio.Themes 
+	local SelectedTheme = Themes[math.random(#Themes)] 
+	
+	bgThemeSound = CustomGitSound(SelectedTheme.Url, Config.Audio.ThemeVolume, SelectedTheme.File, "pandemobaba", workspace, true, true)
+
+	local objects = game:GetObjects(Config.Assets.ModelID) 
+	if #objects == 0 then return end 
+	local obj = objects[1] 
+	local model 
+	if obj:IsA("Model") then 
+		model = obj 
+	elseif obj:IsA("BasePart") then 
+		model = Instance.new("Model") 
+		obj.Parent = model 
+		model.PrimaryPart = obj 
+	else return end 
+	model.Parent = workspace 
+	model.Name = "PandemoniumChecking" 
+	if model:FindFirstChild("Pandemonium") and model.Pandemonium:FindFirstChild("Screaming") then
+		model.Pandemonium.Screaming.Playing = false 
+	end 
+	
+	local spawnCFrame = hrp.CFrame * CFrame.new(0, 0, Config.Assets.EntityDistanceOffset) 
+	
+	if not model.PrimaryPart then 
+		local pp = model:FindFirstChildWhichIsA("BasePart", true) 
+		if pp then model.PrimaryPart = pp end 
+	end 
+	if model.PrimaryPart then 
+		model:PivotTo(spawnCFrame) 
+		task.spawn(function() 
+			CustomGitSound(Config.Assets.ScreamingAudioUrl, 0.5, "screaming", "CSRAMIN", model.PrimaryPart, true, true) 
+		end) 
+	end 
+end) 
+
+local PlayerModule = require(player.PlayerScripts:WaitForChild("PlayerModule")) 
+local Controls = PlayerModule:GetControls() 
+Controls:Disable() 
+
+-- KHÓA CAMERA CỐ ĐỊNH NHƯNG VẪN CHO RUNG
+local camera = workspace.CurrentCamera 
+local initialCamCFrame = camera.CFrame
+camera.CameraType = Enum.CameraType.Scriptable
+
+local ShakeConfig = { Intensity = Config.Visuals.ShakeIntensity, SpeedMultiplier = Config.Visuals.ShakeSpeedMultiplier } 
+local fadeObjects = {miniGame} 
+for _, v in ipairs(miniGame:GetDescendants()) do 
+	table.insert(fadeObjects, v) 
+end 
+
+-- Load các tiếng đập tủ
+local PushSounds = {} 
+for i, soundUrl in ipairs(Config.Audio.PushSounds) do 
+	table.insert(PushSounds, CustomGitSound(soundUrl, Config.Audio.PushVolume, "chao_" .. i, "Push" .. i, workspace, false, false)) 
+end 
+
+local function PlayRandomPushSound() 
+	if #PushSounds == 0 then return end
+	local sound = PushSounds[math.random(#PushSounds)] 
+	sound:Stop() 
+	sound.TimePosition = 0 
+	sound:Play() 
+end 
+
+-- XỬ LÝ FADE-IN MƯỢT MÀ CHO UI MINI GAME
+local originalTransparencies = {} 
+for _, v in ipairs(fadeObjects) do 
+	if v:IsA("CanvasGroup") then originalTransparencies[v] = {GroupTransparency = v.GroupTransparency} v.GroupTransparency = 1 
+	elseif v:IsA("ImageLabel") or v:IsA("ImageButton") then originalTransparencies[v] = {ImageTransparency = v.ImageTransparency} v.ImageTransparency = 1 
+	elseif v:IsA("TextLabel") or v:IsA("TextButton") or v:IsA("TextBox") then originalTransparencies[v] = {TextTransparency = v.TextTransparency, TextStrokeTransparency = v.TextStrokeTransparency} v.TextTransparency = 1 v.TextStrokeTransparency = 1 
+	elseif v:IsA("Frame") then originalTransparencies[v] = {BackgroundTransparency = v.BackgroundTransparency} v.BackgroundTransparency = 1 
+	elseif v:IsA("ScrollingFrame") then originalTransparencies[v] = {BackgroundTransparency = v.BackgroundTransparency, ScrollBarImageTransparency = v.ScrollBarImageTransparency} v.BackgroundTransparency = 1 v.ScrollBarImageTransparency = 1 
+	elseif v:IsA("UIStroke") then originalTransparencies[v] = {Transparency = v.Transparency} v.Transparency = 1 
+	end 
+end 
+
+miniGame.Visible = true 
+
+for obj, goals in pairs(originalTransparencies) do 
+	TweenService:Create(obj, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goals):Play() 
+end
+
+local playerCircle, templateMiddle, mainBar 
+for _, v in ipairs(miniGame:GetDescendants()) do 
+	if v:IsA("ImageLabel") then 
+		if v.Name == "circle" then playerCircle = v 
+		elseif v.Name == "middle" then templateMiddle = v end 
+	elseif v:IsA("Frame") and v.Name == "Bar" then 
+		mainBar = v 
+	end 
+end 
+
+if templateMiddle then templateMiddle.Visible = false end 
+
+local targetPosition = playerCircle.Position 
+local smoothPosition = playerCircle.Position
+local MoveVelocity = Vector2.zero 
+local MoveFriction = Config.Gameplay.MoveFriction 
+local SwipePower = Config.Gameplay.SwipePower 
+local MaxVelocity = Config.Gameplay.MaxVelocity 
+
+local PlayerFollowSpeed = Config.Gameplay.PlayerFollowSpeed 
+local PushFollowSpeed = Config.Gameplay.PushFollowSpeed 
+local CurrentFollowSpeed = PlayerFollowSpeed 
+
+local shakeTime = 0 
+local shakeAmount = Config.Visuals.CircleShakeAmount 
+local shakeSpeedX = Config.Visuals.CircleShakeSpeedX 
+local shakeSpeedY = Config.Visuals.CircleShakeSpeedY 
+
+local Frozen = false 
+local IsBeingPushed = false 
+local PressureShake = Config.Visuals.PressureShake 
+local PressureBlackout = Config.Visuals.PressureBlackout 
+
+local BlackoutConnection 
+local BlackFrame, ActiveShaker 
+local PushForce = Vector2.new(0,0) 
+
+local PlayerGui = player.PlayerGui 
+local BlackGui = Instance.new("ScreenGui") 
+BlackGui.Name = "PressureBlackoutGui" 
+BlackGui.IgnoreGuiInset = true 
+BlackGui.ResetOnSpawn = false 
+BlackGui.Parent = PlayerGui 
+
+BlackFrame = Instance.new("Frame") 
+BlackFrame.Size = UDim2.fromScale(1,1) 
+BlackFrame.BackgroundColor3 = Color3.new(0,0,0) 
+BlackFrame.BackgroundTransparency = 1 
+BlackFrame.BorderSizePixel = 0 
+BlackFrame.Parent = BlackGui 
+
+-- HỆ THỐNG CAMERA SHAKER TỐI ƯU HÓA MEMORY
+local function initializeBypassedShaker() 
+	local playerCamera = workspace.CurrentCamera 
+	if not playerCamera then return nil end 
+	
+	local function cameraCallback(shakeCFrame) 
+		playerCamera.CFrame = initialCamCFrame * shakeCFrame 
+	end 
+	
+	local renderPriority = Enum.RenderPriority.Camera.Value + 1 
+	local shakerInstance = { 
+		["_running"] = false, 
+		["_renderName"] = "BypassedCameraShaker", 
+		["_renderPriority"] = renderPriority, 
+		["_camShakeInstances"] = {}, 
+		["_removeInstances"] = {}, 
+		["_callback"] = cameraCallback 
+	} 
+	RunService:BindToRenderStep(shakerInstance._renderName, shakerInstance._renderPriority, function(deltaTime) 
+		local posAccumulator = Vector3.zero
+		local rotAccumulator = Vector3.zero 
+		local instances = shakerInstance._camShakeInstances 
+		local removeCount = 0
+		
+		for i = 1, #instances do 
+			local inst = instances[i] 
+			if inst.currentFadeTime <= 0 and not inst.sustain then 
+				removeCount += 1
+				shakerInstance._removeInstances[removeCount] = i 
+			else 
+				local deltaTick = inst.tick 
+				local fadeTime = inst.currentFadeTime 
+				local noiseVal = Vector3.new(math.noise(deltaTick, 0) * 0.5, math.noise(0, deltaTick) * 0.5, math.noise(deltaTick, deltaTick) * 0.5) 
+				if inst.fadeInDuration > 0 and inst.sustain then 
+					if fadeTime < 1 then fadeTime = fadeTime + deltaTime / inst.fadeInDuration end 
+				end 
+				if not inst.sustain then fadeTime = fadeTime - deltaTime / inst.fadeOutDuration end 
+				if inst.sustain then 
+					inst.tick = deltaTick + deltaTime * inst.Roughness * inst.roughMod 
+				else 
+					inst.tick = deltaTick + deltaTime * inst.Roughness * inst.roughMod * fadeTime 
+				end 
+				inst.currentFadeTime = math.clamp(fadeTime, 0, 1) 
+				local shakeVector = noiseVal * inst.Magnitude * inst.magnMod * fadeTime 
+				posAccumulator = posAccumulator + shakeVector * inst.PositionInfluence 
+				rotAccumulator = rotAccumulator + shakeVector * inst.RotationInfluence 
+			end 
+		end 
+		for i = removeCount, 1, -1 do 
+			table.remove(instances, shakerInstance._removeInstances[i]) 
+			shakerInstance._removeInstances[i] = nil 
+		end 
+		local finalCFrame = CFrame.new(posAccumulator) * CFrame.Angles(0, math.rad(rotAccumulator.Y), 0) * CFrame.Angles(math.rad(rotAccumulator.X), 0, math.rad(rotAccumulator.Z)) 
+		shakerInstance._callback(finalCFrame) 
+	end) 
+	shakerInstance._running = true 
+	return shakerInstance 
+end 
+
+local function shakeCameraInfinite() 
+	if not ActiveShaker then return end 
+	local data = {Magnitude = 0.4, Roughness = 20, PosInf = Vector3.new(0, 0.15, 0), RotInf = Vector3.new(1.25, 0, 4)} 
+	local newInstance = { 
+		["Magnitude"] = data.Magnitude, 
+		["Roughness"] = data.Roughness, 
+		["PositionInfluence"] = data.PosInf, 
+		["RotationInfluence"] = data.RotInf, 
+		["roughMod"] = ShakeConfig.SpeedMultiplier, 
+		["magnMod"] = ShakeConfig.Intensity, 
+		["fadeOutDuration"] = 0.5, 
+		["fadeInDuration"] = 2, 
+		["sustain"] = true, 
+		["currentFadeTime"] = 0, 
+		["tick"] = Random.new():NextNumber(-100, 100) 
+	} 
+	table.insert(ActiveShaker._camShakeInstances, newInstance) 
+end 
+
+local function PlayShockWave() 
+	if not ActiveShaker then return end 
+	local newInstance = { 
+		Magnitude = 12, Roughness = 35, 
+		PositionInfluence = Vector3.new(0.5,0.5,0.5), RotationInfluence = Vector3.new(4,4,4), 
+		roughMod = 2, magnMod = 1.2, fadeOutDuration = 0.8, fadeInDuration = 0.05, 
+		sustain = false, currentFadeTime = 1, tick = Random.new():NextNumber(-100,100) 
+	} 
+	table.insert(ActiveShaker._camShakeInstances, newInstance) 
+end 
+
+ActiveShaker = initializeBypassedShaker() 
+shakeCameraInfinite() 
+
+if PressureBlackout then 
+	BlackoutConnection = RunService.RenderStepped:Connect(function() 
+		local wave = math.sin(os.clock() * 75) 
+		local weight = (wave + 1) / 2 
+		BlackFrame.BackgroundTransparency = 1 - (weight * 0.2) 
+	end) 
+end 
+
+-- Xử lý điều khiển Chuột & Cảm ứng
+if UserInputService.TouchEnabled then 
+	UserInputService.TouchMoved:Connect(function(input) 
+		if Frozen or IsBeingPushed then return end 
+		local delta = input.Delta 
+		MoveVelocity += Vector2.new(delta.X, delta.Y) * SwipePower 
+		if MoveVelocity.Magnitude > MaxVelocity then 
+			MoveVelocity = MoveVelocity.Unit * MaxVelocity 
+		end 
+	end) 
+else 
+	UserInputService.InputChanged:Connect(function(input) 
+		if Frozen or IsBeingPushed or not playerCircle or not playerCircle.Parent then return end 
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end 
+		
+		local mousePos = UserInputService:GetMouseLocation() 
+		local parent = playerCircle.Parent 
+		local parentPos = parent.AbsolutePosition 
+		local parentSize = parent.AbsoluteSize 
+		local circleSize = playerCircle.AbsoluteSize 
+		local Overflow = 90 
+		local x = math.clamp(mousePos.X - parentPos.X - circleSize.X/2, -Overflow, parentSize.X - circleSize.X + Overflow) 
+		local y = math.clamp(mousePos.Y - parentPos.Y - circleSize.Y/2, -Overflow, parentSize.Y - circleSize.Y + Overflow) 
+		targetPosition = UDim2.fromOffset(x, y) 
+	end) 
+end 
+
+-- HÀM ĐẬP TỦ (HẤT VĂNG)
+local function ExecutePush()
+	if Frozen or Ended then return end
+	IsBeingPushed = true 
+	CurrentFollowSpeed = PushFollowSpeed 
+
+	local parent = playerCircle.Parent 
+	local parentSize = parent.AbsoluteSize 
+	local circleSize = playerCircle.AbsoluteSize 
+
+	local angles = {0, math.pi/2, math.pi, math.pi*1.5, math.pi/4, math.pi*0.75}
+	local angle = angles[math.random(#angles)]
+	local distance = math.max(parentSize.X, parentSize.Y) * 0.85
+
+	local currentPos = Vector2.new(playerCircle.Position.X.Offset, playerCircle.Position.Y.Offset)
+	local pushOffsetVec = Vector2.new(math.cos(angle), math.sin(angle)) * distance
+	local targetVec = currentPos + pushOffsetVec
+
+	local Overflow = 90
+	local clampX = math.clamp(targetVec.X, -Overflow, parentSize.X - circleSize.X + Overflow)
+	local clampY = math.clamp(targetVec.Y, -Overflow, parentSize.Y - circleSize.Y + Overflow)
+
+	targetPosition = UDim2.fromOffset(clampX, clampY)
+	smoothPosition = targetPosition
+	PushForce = pushOffsetVec.Unit * Config.Gameplay.PushForce
+
+	PlayRandomPushSound()
+	PlayShockWave()
+
+	task.delay(Config.Gameplay.PushLockDuration, function()
+		IsBeingPushed = false
+		CurrentFollowSpeed = PlayerFollowSpeed
+	end)
+end
+
+-- Hàm xử lý thua cuộc (Đã bỏ Jumpscare)
+local function TriggerDefeat()
+	if Ended then return end
+	Ended = true 
+	Frozen = true 
+
+	LockLockerSystem(false)
+
+	camera.CameraType = Enum.CameraType.Custom
+	if BlackoutConnection then BlackoutConnection:Disconnect() end 
+	if BlackGui then BlackGui:Destroy() end 
+	if ActiveShaker then 
+		ActiveShaker._camShakeInstances = {} 
+		RunService:UnbindFromRenderStep(ActiveShaker._renderName) 
+		ActiveShaker = nil 
+	end 
+	Controls:Enable() 
+
+	if bgThemeSound then bgThemeSound:Destroy() end 
+	for _, name in ipairs({"Push1","Push2","Push3","Push4"}) do 
+		local s = workspace:FindFirstChild(name) 
+		if s then s:Destroy() end 
+	end 
+
+	local checking = workspace:FindFirstChild("PandemoniumChecking") 
+	if checking then checking:Destroy() end 
+	if miniGame then miniGame:Destroy() end 
+
+	-- Trực tiếp xử lý sát thương chết người
+	local damageRemote = ReplicatedStorage:FindFirstChild("LocalDamage", true) or ReplicatedStorage:FindFirstChild("ChangeHealth", true) 
+	if damageRemote and damageRemote:IsA("RemoteEvent") then 
+		damageRemote:FireServer(100, "SittingItOut", 1, nil) 
+		damageRemote:FireServer("Damage", 100) 
+	end 
+
+	task.spawn(function() 
+		while true do 
+			task.wait(0.5) 
+			local playerGui = game.Players.LocalPlayer.PlayerGui 
+			local afterDeath = playerGui:FindFirstChild("Main") and playerGui.Main:FindFirstChild("AfterDeath")
+			if afterDeath and afterDeath:FindFirstChild("Document") then
+				local entityPage = afterDeath.Document.EntityPage 
+				local imgLabel = entityPage.DeathFrame.Entities.Button.ImageLabel 
+				imgLabel.Image = Config.Jumpscare.EntityImageID 
+				imgLabel.ImageColor3 = Color3.fromRGB(255, 255, 255) 
+				entityPage.DeathFrame.EntityName.Text = Config.Jumpscare.EntityName 
+				afterDeath.Document.ScorePage.OverseerNotes.Text = Config.Jumpscare.OverseerNotes 
+			end
+		end 
+	end) 
+end
+
+-- Render loop cập nhật vị trí Circle (Tối ưu nhẹ nhàng)
+RunService.RenderStepped:Connect(function(dt) 
+	if Frozen or Ended then return end 
+
+	shakeTime += dt 
+
+	if not IsBeingPushed then
+		MoveVelocity *= MoveFriction 
+		targetPosition = targetPosition + UDim2.fromOffset(MoveVelocity.X * dt, MoveVelocity.Y * dt) 
+	end
+
+	local parent = playerCircle.Parent 
+	if not parent then return end
+	local parentSize = parent.AbsoluteSize 
+	local circleSize = playerCircle.AbsoluteSize 
+	local Overflow = 90 
+	targetPosition = UDim2.fromOffset( 
+		math.clamp(targetPosition.X.Offset, -Overflow, parentSize.X - circleSize.X + Overflow), 
+		math.clamp(targetPosition.Y.Offset, -Overflow, parentSize.Y - circleSize.Y + Overflow) 
+	) 
+
+	local alpha = math.clamp(dt * CurrentFollowSpeed, 0, 1) 
+	local pushOffset = UDim2.fromOffset(PushForce.X * dt, PushForce.Y * dt) 
+
+	smoothPosition = smoothPosition:Lerp(targetPosition + pushOffset, alpha) 
+	PushForce *= 0.85 
+
+	local ox = math.sin(shakeTime * shakeSpeedX) * shakeAmount + math.cos(shakeTime * (shakeSpeedX * 1.6)) * (shakeAmount * 0.35) 
+	local oy = math.cos(shakeTime * shakeSpeedY) * shakeAmount + math.sin(shakeTime * (shakeSpeedY * 1.6)) * (shakeAmount * 0.35) 
+
+	playerCircle.Position = smoothPosition + UDim2.fromOffset(ox, oy) 
+end) 
+
+-- THUẬT TOÁN 4 GÓC MÀN HÌNH + KIỂM TRA KHOẢNG CÁCH TỐI THIỂU
+local function GetFarApartPositions(container)
+	local containerSize = container.AbsoluteSize
+	local width = containerSize.X > 100 and containerSize.X or 800
+	local height = containerSize.Y > 100 and containerSize.Y or 600
+	
+	local padding = 50
+	local circleDiameter = 90
+	local halfW = (width - padding * 2) / 2
+	local halfH = (height - padding * 2) / 2
+	
+	local quadrants = {
+		{ minX = padding, maxX = padding + halfW - circleDiameter, minY = padding, maxY = padding + halfH - circleDiameter },
+		{ minX = padding + halfW, maxX = width - padding - circleDiameter, minY = padding, maxY = padding + halfH - circleDiameter },
+		{ minX = padding, maxX = padding + halfW - circleDiameter, minY = padding + halfH, maxY = height - padding - circleDiameter },
+		{ minX = padding + halfW, maxX = width - padding - circleDiameter, minY = padding + halfH, maxY = height - padding - circleDiameter },
+	}
+	
+	for i = #quadrants, 2, -1 do
+		local j = math.random(i)
+		quadrants[i], quadrants[j] = quadrants[j], quadrants[i]
+	end
+	
+	local minDistance = math.max(220, math.min(width, height) * 0.35)
+	
+	local positions = {}
+	for i = 1, 3 do
+		local quad = quadrants[i]
+		local selectedPos = nil
+		local attempts = 0
+		
+		repeat
+			attempts += 1
+			local rx = math.random(math.floor(quad.minX), math.floor(math.max(quad.minX + 10, quad.maxX)))
+			local ry = math.random(math.floor(quad.minY), math.floor(math.max(quad.minY + 10, quad.maxY)))
+			local candidateVec = Vector2.new(rx, ry)
+			
+			local isFarEnough = true
+			for _, pos in ipairs(positions) do
+				local prevVec = Vector2.new(pos.X.Offset, pos.Y.Offset)
+				if (candidateVec - prevVec).Magnitude < minDistance then
+					isFarEnough = false
+					break
+				end
+			end
+			
+			if isFarEnough or attempts > 25 then
+				selectedPos = UDim2.fromOffset(rx, ry)
+			end
+		until selectedPos
+		
+		table.insert(positions, selectedPos)
+	end
+	
+	return positions
+end
+
+-- =================================================================
+-- [ HỆ THỐNG QUẢN LÝ 7 PHASE ]
+-- =================================================================
+task.spawn(function()
+	task.wait(1.5)
+	
+	local fullMainBarSize = mainBar.Size
+	
+	for currentPhase = 1, Config.Gameplay.TotalPhases do
+		if Ended then break end
+		
+		local phaseDuration = Config.Gameplay.PhaseTimes[currentPhase] or 10
+		local remainingTime = phaseDuration
+		
+		local activeTargets = {}
+		local container = playerCircle.Parent
+		
+		local completedCount = 0
+		
+		local circlePositions = GetFarApartPositions(container)
+		
+		for i = 1, 3 do
+			local targetFrame = templateMiddle:Clone()
+			targetFrame.Name = "TargetCircle_" .. i
+			targetFrame.Visible = true
+			targetFrame.Parent = container
+			
+			local subBarBackground = Instance.new("Frame")
+			subBarBackground.Name = "SubBarBg"
+			subBarBackground.Size = UDim2.new(0.9, 0, 0.1, 0)
+			subBarBackground.AnchorPoint = Vector2.new(0.5, 0)
+			subBarBackground.Position = UDim2.new(0.5, 0, 1.08, 0)
+			subBarBackground.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			subBarBackground.BackgroundTransparency = 0.5
+			subBarBackground.BorderSizePixel = 0
+			subBarBackground.Parent = targetFrame
+			
+			local subBarFill = Instance.new("Frame")
+			subBarFill.Name = "SubBarFill"
+			subBarFill.Size = UDim2.new(0, 0, 1, 0)
+			subBarFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+			subBarFill.BorderSizePixel = 0
+			subBarFill.Parent = subBarBackground
+			
+			targetFrame.Position = circlePositions[i]
+			
+			table.insert(activeTargets, {
+				Frame = targetFrame,
+				BarFill = subBarFill,
+				Progress = 0,
+				IsCompleted = false,
+			})
+		end
+		
+		ExecutePush()
+		
+		while remainingTime > 0 and completedCount < 3 and not Ended do
+			local dt = RunService.RenderStepped:Wait()
+			remainingTime -= dt
+			
+			local mainPercent = math.clamp(remainingTime / phaseDuration, 0, 1)
+			mainBar.Size = UDim2.new(fullMainBarSize.X.Scale * mainPercent, fullMainBarSize.X.Offset * mainPercent, fullMainBarSize.Y.Scale, fullMainBarSize.Y.Offset)
+			
+			local playerCenter = playerCircle.AbsolutePosition + playerCircle.AbsoluteSize / 2
+			
+			for _, targetData in ipairs(activeTargets) do
+				if not targetData.IsCompleted then
+					local tCenter = targetData.Frame.AbsolutePosition + targetData.Frame.AbsoluteSize / 2
+					local tRadius = math.min(targetData.Frame.AbsoluteSize.X, targetData.Frame.AbsoluteSize.Y) / 2
+					local isHovering = (playerCenter - tCenter).Magnitude <= tRadius
+					
+					if isHovering then
+						targetData.Progress = math.clamp(targetData.Progress + (dt / Config.Gameplay.CircleFillTime), 0, 1)
+						targetData.BarFill.Size = UDim2.new(targetData.Progress, 0, 1, 0)
+						
+						if targetData.Progress >= 1 then
+							targetData.IsCompleted = true
+							completedCount += 1
+							
+							remainingTime = math.min(phaseDuration, remainingTime + Config.Gameplay.TimeBonusOnComplete)
+							
+							local frameToDestroy = targetData.Frame
+							task.spawn(function()
+								for _, desc in ipairs(frameToDestroy:GetDescendants()) do
+									if desc:IsA("ImageLabel") then
+										TweenService:Create(desc, TweenInfo.new(Config.Gameplay.FadeOutDuration), {ImageTransparency = 1}):Play()
+									elseif desc:IsA("Frame") then
+										TweenService:Create(desc, TweenInfo.new(Config.Gameplay.FadeOutDuration), {BackgroundTransparency = 1}):Play()
+									end
+								end
+								if frameToDestroy:IsA("ImageLabel") then
+									TweenService:Create(frameToDestroy, TweenInfo.new(Config.Gameplay.FadeOutDuration), {ImageTransparency = 1}):Play()
+								end
+								task.wait(Config.Gameplay.FadeOutDuration)
+								if frameToDestroy and frameToDestroy.Parent then
+									frameToDestroy:Destroy()
+								end
+							end)
+						end
+					end
+				end
+			end
+			
+			if remainingTime <= 0 then
+				TriggerDefeat()
+				return
+			end
+		end
+		
+		for _, targetData in ipairs(activeTargets) do
+			if targetData.Frame and targetData.Frame.Parent then
+				targetData.Frame:Destroy()
+			end
+		end
+		
+		mainBar.Size = fullMainBarSize
+		task.wait(0.2)
+	end
+	
+	-- CHIẾN THẮNG KHI XONG CẢ 7 PHASE
+	if not Ended then
+		Ended = true
+		Frozen = true 
+
+		LockLockerSystem(false)
+
+		camera.CameraType = Enum.CameraType.Custom
+		if BlackoutConnection then BlackoutConnection:Disconnect() end 
+		if BlackGui then BlackGui:Destroy() end 
+		if ActiveShaker then 
+			ActiveShaker._camShakeInstances = {} 
+			RunService:UnbindFromRenderStep(ActiveShaker._renderName) 
+			ActiveShaker = nil 
+		end 
+
+		if bgThemeSound and bgThemeSound.Parent then
+			TweenService:Create(bgThemeSound, TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Volume = 0}):Play()
+		end
+
+		local checking = workspace:FindFirstChild("PandemoniumChecking") 
+		if checking then
+			local targetCF = checking:GetPivot() * CFrame.new(0, -15, 0)
+			TweenModelCFrame(checking, targetCF, 2)
+		end
+
+		local FadeOutTweens = {} 
+		for _, v in ipairs(fadeObjects) do 
+			local goals = {} 
+			if v:IsA("CanvasGroup") then goals.GroupTransparency = 1 
+			elseif v:IsA("ImageLabel") or v:IsA("ImageButton") then goals.ImageTransparency = 1 
+			elseif v:IsA("TextLabel") or v:IsA("TextButton") or v:IsA("TextBox") then goals.TextTransparency = 1 goals.TextStrokeTransparency = 1 
+			elseif v:IsA("Frame") then goals.BackgroundTransparency = 1 
+			elseif v:IsA("ScrollingFrame") then goals.BackgroundTransparency = 1 goals.ScrollBarImageTransparency = 1 
+			elseif v:IsA("UIStroke") then goals.Transparency = 1 end 
+
+			if next(goals) then 
+				local t = TweenService:Create(v, TweenInfo.new(2, Enum.EasingStyle.Quad), goals) 
+				table.insert(FadeOutTweens, t) 
+				t:Play() 
+			end 
+		end 
+
+		task.wait(2) 
+
+		Controls:Enable() 
+		if miniGame then miniGame:Destroy() end 
+
+		if bgThemeSound then bgThemeSound:Destroy() end
+		for _, v in ipairs(workspace:GetChildren()) do 
+			if v:IsA("Sound") and v.Name:sub(1,4) == "Push" then 
+				v:Destroy() 
+			end 
+		end 
+
+		if checking then 
+			checking:Destroy() 
+		end 
+	end
+end)
